@@ -159,7 +159,7 @@ non-i.i.d. data, and convergence guarantees under attack.
   title  = {RoDiLoCo: Byzantine-Robust Low-Communication Distributed Training},
   author = {Benkiran, Taha},
   year   = {2026},
-  note   = {https://github.com/<your-username>/RodliCo}
+  note   = {https://github.com/MTahaB/RodliCo}
 }
 ```
 
