@@ -1,0 +1,35 @@
+# Phase 4 — a robust defense against the worst Phase-3 attack.
+# Comparative campaign: swap `aggregator` across {mean, trimmed_mean, krum,
+# geometric_median, trust_weighted} and n_byzantine across {0, 1, 2}.
+seed: 0
+device: auto
+seq_len: 64
+batch_size: 16
+
+n_workers: 8
+iid: true
+H: 125
+outer_rounds: 40
+inner_lr: 3.0e-3
+outer_lr: 0.7
+outer_momentum: 0.9
+weight_decay: 0.1
+grad_clip: 1.0
+
+aggregator: trust_weighted
+aggregator_kwargs:
+  beta: 0.9
+  tau: 0.1
+  normalize: true
+attack: sign_flip
+attack_lam: 10.0
+n_byzantine: 1
+
+eval_every: 5
+eval_batches: 10
+out_dir: outputs/defense_trustweighted_f1
+model:
+  d_model: 128
+  n_layers: 3
+  n_heads: 4
+  max_seq_len: 64

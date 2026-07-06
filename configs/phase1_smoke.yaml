@@ -1,0 +1,18 @@
+# Phase 1 — tiny CPU smoke run. Not a research result; proves the loop converges.
+seed: 0
+device: auto
+seq_len: 64
+batch_size: 16
+lr: 3.0e-3
+weight_decay: 0.1
+warmup: 50
+grad_clip: 1.0
+steps: 400
+eval_every: 50
+eval_batches: 10
+out_dir: outputs/phase1_smoke
+model:
+  d_model: 128
+  n_layers: 3
+  n_heads: 4
+  max_seq_len: 64

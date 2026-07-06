@@ -1,0 +1,254 @@
+% RoDiLoCo — arXiv-style writeup.
+% Compiles out-of-the-box with `article`. To switch to the official ICML/NeurIPS style,
+% drop in icml2024.sty / neurips_2024.sty, replace the \documentclass line, and delete the
+% geometry package. Build:  pdflatex rodiloco ; bibtex rodiloco ; pdflatex rodiloco x2
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage[numbers,round]{natbib}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\dg}{\Delta}          % pseudo-gradient
+\newcommand{\agg}{\bar{\Delta}}   % aggregated pseudo-gradient
+
+\title{\textbf{RoDiLoCo}: How Fragile is Low-Communication Training,\\ and Can Classical Byzantine Defenses Save It?}
+\author{Taha Benkiran}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Low-communication training methods such as DiLoCo~\citep{diloco2023} promise
+\emph{cross-organisation}, \emph{over-the-internet} pretraining, exchanging pseudo-gradients
+only every $H$ inner steps and matching synchronous quality at two orders of magnitude less
+communication. Yet this literature assumes \emph{honest} workers---precisely the assumption
+that the cross-organisation setting violates. We ask three questions. (i)~How fragile is
+vanilla DiLoCo: what Byzantine fraction $f$ suffices to derail a run, and does the
+synchronisation period $H$ modulate that fragility? (ii)~Do classical Byzantine-robust
+aggregators (Krum, coordinate-wise trimmed mean, geometric median) \emph{transfer} to
+DiLoCo's outer regime---aggregating pseudo-gradients accumulated over $H$ AdamW steps and
+consumed by outer Nesterov momentum, at only $n\!\approx\!8$ workers? (iii)~What is the
+\emph{robustness tax}: the quality lost, absent any attack, from using a robust aggregator?
+We further propose a trust-weighted outer optimizer that scores workers by the temporal
+consistency of their pseudo-gradients and \emph{weights} rather than \emph{excludes} them.
+On a nanochat-scale testbed with sequentially-simulated workers, we find \todo{one-sentence
+headline result}. Code: \url{https://github.com/<user>/RodliCo}.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+DiLoCo and its descendants~\citep{diloco2023,streamingdiloco2025,dilocoscaling2025} make a
+striking promise: independent parties, poorly connected, can jointly pretrain a single model
+while communicating hundreds of times less than synchronous data-parallel training. The
+motivating vision is explicitly \emph{cross-organisation} and \emph{over-the-internet}. But
+that vision is in tension with a silent premise of the method: every worker is assumed to
+report its pseudo-gradient honestly. A single corrupted worker at the outer aggregation
+step---where per-worker pseudo-gradients are averaged---can, in principle, destroy an entire
+pretraining run.
+
+This gap is not addressed by existing resilience work. Decoupled
+DiLoCo~\citep{decoupleddiloco2026} hardens DiLoCo against \emph{hardware failures}: workers
+that go absent. That is \emph{fault-tolerance} (crash-stop, honest-but-absent), not
+\emph{Byzantine-tolerance} (present-and-adversarial). The two are different problems, and the
+latter is, to our knowledge, unstudied for DiLoCo.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item A \textbf{fragility characterization} of vanilla DiLoCo under three attack families,
+  quantifying the Byzantine fraction that derails training and the (non-obvious) effect of
+  the synchronisation period $H$ (\S\ref{sec:fragility}).
+  \item A \textbf{transfer study}: whether Krum, trimmed mean, and geometric median---designed
+  for the inner-gradient, large-$n$ federated regime---remain effective over DiLoCo's
+  outer-momentum, pseudo-gradient, small-$n$ regime, together with the \textbf{robustness
+  tax} they levy at $f=0$ (\S\ref{sec:defenses}).
+  \item A \textbf{trust-weighted outer optimizer} that exploits the temporal structure unique
+  to the outer setting, weighting workers rather than excluding them (\S\ref{sec:defenses}).
+\end{enumerate}
+
+\section{Background}
+\label{sec:background}
+
+\paragraph{DiLoCo.}
+DiLoCo alternates $H$ inner AdamW~\citep{adamw2019} steps on each worker's data shard with a
+single outer step. Worker $k$ produces a pseudo-gradient
+$\dg_k = \theta_{\text{before}} - \theta_{\text{after}}$; the server aggregates
+$\agg = \tfrac{1}{n}\sum_k \dg_k$ and applies an outer Nesterov step. It is a variant of
+FedAvg~\citep{fedavg2017} with a large number of inner steps and a momentum-based outer
+optimizer~\citep{outeroptimizers2025}.
+
+\paragraph{Byzantine-robust aggregation.}
+The federated-learning literature offers robust replacements for the mean: Krum, which selects
+the update closest to its nearest neighbours~\citep{krum2017}; coordinate-wise trimmed
+mean~\citep{trimmedmean2018}; and the geometric median. These were designed for raw stochastic
+\emph{gradients} at \emph{large} $n$. Recent work even shows the mean can outdo robust
+aggregators under some heterogeneous poisoning~\citep{meanrobust2024}, underscoring that
+transfer to a new regime is not a given.
+
+\paragraph{The gap.}
+DiLoCo's outer step differs from that setting on three axes at once: it aggregates
+\emph{pseudo-gradients} (accumulated over $H$ AdamW steps, not single gradients), those are
+consumed by \emph{outer momentum}, and $n$ is \emph{small} ($\approx 8$). The nearest
+adjacent work, DeMoA~\citep{demoa2025}, combines Byzantine robustness, communication
+efficiency, and momentum---but in federated learning over client gradients, not DiLoCo
+pretraining. RoDiLoCo studies the empty intersection.
+
+\section{Threat Model and Setup}
+\label{sec:setup}
+
+\paragraph{Model and data.}
+We train a decoder-only Transformer (RMSNorm, RoPE, SwiGLU) of \todo{$P$} parameters on
+\todo{TinyStories / FineWeb-Edu subset}~\citep{tinystories2023}, at nanochat
+scale~\citep{nanochatdiloco2025}. Hyperparameters are in Table~\ref{tab:hp}.
+
+\paragraph{Simulated workers.}
+Following the resource constraints of a single-GPU study, the $n$ workers are simulated
+\emph{sequentially} on one device: for each worker we load the global parameters, run $H$
+inner steps on its shard, and store $\dg_k$; we then aggregate and take the outer step.
+Communication is accounted \emph{analytically} (bytes that would be exchanged), never
+physically transmitted. Data is partitioned i.i.d.\ across workers (non-i.i.d.\ is an
+ablation).
+
+\paragraph{Threat model.}
+Up to $f$ of $n$ workers are Byzantine and may (a) report a falsified $\dg_k$, or (b) train
+honestly on a corrupted objective. We consider three attacks:
+\emph{sign-flip} ($\dg_k \to -\lambda\dg_k$), \emph{scaled noise} ($\dg_k$ replaced by noise
+calibrated to the honest norm), and \emph{targeted drift} (inner poisoning via label
+permutation, which keeps $\|\dg_k\|$ plausible). The server knows neither which workers are
+Byzantine nor $f$ exactly.
+
+\paragraph{Defenses.}
+All defenses share one interface, $\texttt{aggregate}(\{\dg_k\}) \to \agg$: mean (baseline),
+trimmed mean, Krum/Multi-Krum, geometric median, and our trust-weighted optimizer
+(\S\ref{sec:defenses}).
+
+\begin{table}[t]
+  \centering
+  \caption{Hyperparameters. Recopied from the DiLoCo paper where applicable.}
+  \label{tab:hp}
+  \begin{tabular}{llll}
+    \toprule
+    Inner opt.\ & AdamW & Outer opt.\ & Nesterov \\
+    Inner lr & \todo{} & Outer lr & \todo{sweep 0.3--1.0} \\
+    $H$ & \todo{50/125/500} & Outer momentum & \todo{0.9} \\
+    Workers $n$ & \todo{8} & Params $P$ & \todo{} \\
+    Seq.\ len & \todo{} & Batch & \todo{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Fragility of Vanilla DiLoCo}
+\label{sec:fragility}
+We first reproduce the DiLoCo baseline: with mean aggregation and no attack, DiLoCo reaches
+perplexity within \todo{$\le 5\%$} of the synchronous reference at equal token budget while
+communicating \todo{$\sim H\times$} less (Figure~\ref{fig:comm}). We then sweep the Byzantine
+fraction $f \in \{0,1,2,3\}/8$ for each attack.
+
+\begin{figure}[t]
+  \centering
+  % \includegraphics[width=0.6\linewidth]{figures/plotP2_comm.pdf}
+  \fbox{\parbox{0.6\linewidth}{\centering \todo{Figure: perplexity vs communication\\
+  (synchronous reference + DiLoCo H-sweep)}}}
+  \caption{Quality vs communication: DiLoCo matches the synchronous reference at far lower
+  communication.}
+  \label{fig:comm}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  % \includegraphics[width=0.6\linewidth]{figures/plot1_fragility.pdf}
+  \fbox{\parbox{0.6\linewidth}{\centering \todo{Plot \#1: final perplexity vs Byzantine
+  fraction $f$, one curve per attack}}}
+  \caption{\textbf{One liar in eight kills pretraining.} Final perplexity under mean
+  aggregation as a function of the Byzantine fraction $f$.}
+  \label{fig:fragility}
+\end{figure}
+
+\paragraph{Finding 1 (fragility).} \todo{e.g.\ $f=1/8$ under sign-flip raises perplexity
+from X to Y; scaled-noise degrades gracefully; targeted drift is stealthiest.}
+
+\paragraph{Finding 2 (effect of $H$).} \todo{net direction of the $H$--fragility trade-off:
+larger $H$ means larger, rarer $\dg$; report which effect dominates.}
+
+\section{Defenses: Transfer, Tax, and Trust Weighting}
+\label{sec:defenses}
+
+\subsection{Classical robust aggregators}
+We port trimmed mean, Krum/Multi-Krum, and the geometric median (Weiszfeld) into the outer
+step and evaluate them against the worst Phase-3 attack. Two effects are measured explicitly:
+the interaction between the defense and outer momentum, and the small-$n$ behaviour of Krum
+(at $n=8$, discarding $f{+}2$ candidates is information-expensive).
+
+\subsection{Trust-weighted outer optimizer}
+We score each worker by an EMA of the cosine similarity between its pseudo-gradient and the
+previous robust aggregate,
+\begin{equation}
+  s_k(t) = \beta\, s_k(t{-}1) + (1-\beta)\,\cos\!\big(\dg_k(t), \agg(t{-}1)\big),
+\end{equation}
+and aggregate with weights $\mathrm{softmax}(s/\tau)$. Unlike Krum it weights rather than
+excludes, retaining information, and it exploits the temporal dimension that the outer setting
+(few rounds, rich $\dg$) makes informative. By design, at $f=0$ all workers stay consistent,
+weights approach uniform, and the method reduces to the mean---the ``zero tax'' property we
+test directly.
+
+\begin{figure}[t]
+  \centering
+  \begin{minipage}{0.48\linewidth}\centering
+    \fbox{\parbox{0.9\linewidth}{\centering \todo{Plot \#2: perplexity vs $f$, one curve per
+    defense}}}
+  \end{minipage}\hfill
+  \begin{minipage}{0.48\linewidth}\centering
+    \fbox{\parbox{0.9\linewidth}{\centering \todo{Plot \#3: robustness tax at $f{=}0$ per
+    defense}}}
+  \end{minipage}
+  \caption{Left: defense transfer under attack. Right: the robustness tax---perplexity at
+  $f=0$ relative to the naive mean.}
+  \label{fig:defenses}
+\end{figure}
+
+\begin{table}[t]
+  \centering
+  \caption{Final perplexity by aggregator and Byzantine fraction, worst attack.}
+  \label{tab:results}
+  \begin{tabular}{lccc}
+    \toprule
+    Aggregator & $f{=}0$ & $f{=}1$ & $f{=}2$ \\
+    \midrule
+    Mean            & \todo{} & \todo{} & \todo{} \\
+    Trimmed mean    & \todo{} & \todo{} & \todo{} \\
+    Krum            & \todo{} & \todo{} & \todo{} \\
+    Geometric median& \todo{} & \todo{} & \todo{} \\
+    Trust-weighted  & \todo{} & \todo{} & \todo{} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Finding 3 (transfer and tax).} \todo{classical defenses transfer partially, at a
+tax of X\%; report whether trust-weighted matches/beats them and why $n{=}8$ + momentum is a
+hard regime.}
+
+\section{Limitations and Directions}
+\label{sec:limitations}
+Our study is deliberately small-scale: a nanochat-class model, workers \emph{simulated} rather
+than physically distributed, and i.i.d.\ shards. Scaling laws for DiLoCo~\citep{dilocoscaling2025}
+suggest which conclusions should hold at larger scale, but we do not verify this directly.
+Natural extensions: the asynchronous / Decoupled setting~\citep{decoupleddiloco2026},
+non-i.i.d.\ data, adaptive attackers, and theoretical convergence guarantees under attack.
+
+\section{Conclusion}
+Low-communication training is most valuable exactly where its honesty assumption is least
+tenable. We quantified DiLoCo's fragility to Byzantine workers, measured how far classical
+defenses transfer and at what cost, and proposed a trust-weighted outer optimizer for the
+regime. \todo{closing sentence with the headline takeaway.}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

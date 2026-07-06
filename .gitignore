@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Data & artifacts (kept out of git; regenerate via scripts)
+data/
+checkpoints/
+*.pt
+*.ckpt
+wandb/
+runs/
+outputs/
+
+# Keep committed results/plots small & explicit
+!results/
+results/**/*.pt
+
+# LaTeX build artifacts (the PDF is rebuilt from source; commit the final one when ready)
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.out
+paper/*.log
+paper/*.pdf
+paper/*.synctex.gz
+paper/*.fdb_latexmk
+paper/*.fls
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

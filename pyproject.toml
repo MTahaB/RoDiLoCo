@@ -1,0 +1,39 @@
+[project]
+name = "rodiloco"
+version = "0.1.0"
+description = "Byzantine-robust low-communication distributed training (Robust DiLoCo)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Taha Benkiran" }]
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+data = ["datasets>=2.19", "tiktoken>=0.7"]
+plot = ["matplotlib>=3.8"]
+track = ["wandb>=0.17"]
+dev = ["pytest>=8.0", "ruff>=0.5", "pre-commit>=3.7"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rodiloco"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = ["E741"]  # allow single-char names l/k common in the math
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,30 @@
+# Phase 2 — DiLoCo baseline (mean aggregation, no attack).
+# HP starting point follows the DiLoCo paper (arXiv 2311.08105): inner AdamW, outer
+# Nesterov with high momentum. Sweep H in {50, 125, 500} and outer_lr in {0.3..1.0}.
+seed: 0
+device: auto
+seq_len: 64
+batch_size: 16
+
+n_workers: 8
+iid: true
+H: 125                 # inner steps per worker per outer round
+outer_rounds: 60
+inner_lr: 3.0e-3
+outer_lr: 0.7          # sweep {0.3, 0.5, 0.7, 1.0} if the gap does not close
+outer_momentum: 0.9    # Nesterov, NOT heavy-ball
+weight_decay: 0.1
+grad_clip: 1.0
+
+aggregator: mean
+attack: none
+n_byzantine: 0
+
+eval_every: 5
+eval_batches: 10
+out_dir: outputs/diloco_baseline
+model:
+  d_model: 128
+  n_layers: 3
+  n_heads: 4
+  max_seq_len: 64
