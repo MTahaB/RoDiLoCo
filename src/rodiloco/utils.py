@@ -25,6 +25,19 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def make_amp(device: "torch.device", enabled: bool = True):
+    """Return ``(use_amp, GradScaler)`` for fp16 mixed precision.
+
+    Enabled only on CUDA (the T4's tensor cores are the whole point). On CPU/MPS the scaler
+    is a no-op, so the *same* training-loop code runs everywhere — scale/unscale/step become
+    pass-throughs. Halving the forward/backward to fp16 is the biggest single speedup on the
+    free T4, on top of the ``_foreach`` optimizer.
+    """
+    use = bool(enabled) and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use)
+    return use, scaler
+
+
 def pick_device(prefer: str = "auto") -> torch.device:
     if prefer != "auto":
         return torch.device(prefer)

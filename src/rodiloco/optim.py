@@ -35,36 +35,51 @@ class AdamW(Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
+        # Same AdamW math as the readable per-parameter version, but batched with the
+        # ``torch._foreach_*`` ops so the whole parameter list updates in a handful of kernel
+        # launches instead of ~O(#tensors) tiny ones. On GPU this is the difference between
+        # being launch-overhead-bound and compute-bound (~5-8x fewer launches per step).
         for group in self.param_groups:
             lr = group["lr"]
             beta1, beta2 = group["betas"]
             eps = group["eps"]
             wd = group["weight_decay"]
+
+            params, grads, ms, vs = [], [], [], []
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                g = p.grad
                 state = self.state[p]
                 if len(state) == 0:
-                    state["step"] = 0
                     state["m"] = torch.zeros_like(p)
                     state["v"] = torch.zeros_like(p)
-                m, v = state["m"], state["v"]
-                state["step"] += 1
-                t = state["step"]
+                params.append(p)
+                grads.append(p.grad)
+                ms.append(state["m"])
+                vs.append(state["v"])
+            if not params:
+                continue
 
-                m.mul_(beta1).add_(g, alpha=1 - beta1)
-                v.mul_(beta2).addcmul_(g, g, value=1 - beta2)
+            # all params in a group step together => a single shared step counter
+            group["t"] = group.get("t", 0) + 1
+            t = group["t"]
 
-                bias1 = 1 - beta1**t
-                bias2 = 1 - beta2**t
-                denom = (v.sqrt() / math.sqrt(bias2)).add_(eps)
-                step_size = lr / bias1
+            # m <- beta1*m + (1-beta1)*g ;  v <- beta2*v + (1-beta2)*g^2
+            torch._foreach_mul_(ms, beta1)
+            torch._foreach_add_(ms, grads, alpha=1 - beta1)
+            torch._foreach_mul_(vs, beta2)
+            torch._foreach_addcmul_(vs, grads, grads, value=1 - beta2)
 
-                # decoupled weight decay (the "W" in AdamW)
-                if wd != 0:
-                    p.mul_(1 - lr * wd)
-                p.addcdiv_(m, denom, value=-step_size)
+            bias1 = 1 - beta1**t
+            bias2 = 1 - beta2**t
+            # denom = sqrt(v)/sqrt(bias2) + eps
+            denom = torch._foreach_sqrt(vs)
+            torch._foreach_div_(denom, math.sqrt(bias2))
+            torch._foreach_add_(denom, eps)
+
+            if wd != 0:  # decoupled weight decay (the "W" in AdamW)
+                torch._foreach_mul_(params, 1 - lr * wd)
+            torch._foreach_addcdiv_(params, ms, denom, value=-lr / bias1)
         return loss
 
 
@@ -84,13 +99,18 @@ def cosine_warmup_lr(step: int, *, base_lr: float, warmup: int, total: int, min_
 
 @torch.no_grad()
 def clip_grad_norm_(params, max_norm: float) -> Tensor:
-    """Global L2 gradient clipping; returns the pre-clip total norm."""
+    """Global L2 gradient clipping; returns the pre-clip total norm.
+
+    Branchless and batched: we compute one clip coefficient ``min(1, max_norm/total)`` and
+    always multiply by it (multiplying by 1.0 is a no-op). Avoiding the Python ``if clip < 1``
+    keeps a GPU scalar off the CPU, so there is no device sync per step — important inside the
+    hot inner loop.
+    """
     grads = [p.grad for p in params if p.grad is not None]
     if not grads:
         return torch.tensor(0.0)
-    total = torch.norm(torch.stack([g.detach().norm(2) for g in grads]), 2)
-    clip = max_norm / (total + 1e-6)
-    if clip < 1:
-        for g in grads:
-            g.mul_(clip)
+    norms = torch._foreach_norm(grads, 2)
+    total = torch.norm(torch.stack(list(norms)), 2)
+    coef = (max_norm / (total + 1e-6)).clamp(max=1.0)
+    torch._foreach_mul_(grads, coef)
     return total

@@ -18,7 +18,7 @@ from .data import TokenDataset, make_char_corpus
 from .generate import generate
 from .model import ModelConfig, build_model
 from .optim import AdamW, clip_grad_norm_, cosine_warmup_lr
-from .utils import git_hash, load_config, pick_device, set_seed
+from .utils import git_hash, load_config, make_amp, pick_device, set_seed
 
 
 def train_single(cfg: dict, device: torch.device | None = None) -> dict:
@@ -44,6 +44,7 @@ def train_single(cfg: dict, device: torch.device | None = None) -> dict:
     mcfg = ModelConfig(vocab_size=meta["vocab_size"], **cfg["model"])
     model = build_model(mcfg).to(device)
     opt = AdamW(model.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
+    use_amp, scaler = make_amp(device, cfg.get("amp", True))
 
     rng = np.random.default_rng(cfg["seed"])
     steps = cfg["steps"]
@@ -58,11 +59,14 @@ def train_single(cfg: dict, device: torch.device | None = None) -> dict:
 
         model.train()
         x, y = train_ds.batch(cfg["batch_size"], rng)
-        _, loss = model(x, y)
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
+            _, loss = model(x, y)
+        scaler.scale(loss).backward()
+        scaler.unscale_(opt)  # unscale before clipping so the norm is in real units
         gnorm = clip_grad_norm_(list(model.parameters()), cfg["grad_clip"])
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
 
         if step % cfg["eval_every"] == 0 or step == steps - 1:
             vloss = evaluate(model, val_ds, rng, cfg["batch_size"], cfg.get("eval_batches", 10))

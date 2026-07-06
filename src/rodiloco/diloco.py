@@ -28,7 +28,16 @@ from .attacks import AttackSpec, apply_delta_attack, choose_byzantine, poison_ta
 from .data import TokenDataset, make_char_corpus, shard_tokens
 from .model import ModelConfig, build_model
 from .optim import AdamW, clip_grad_norm_
-from .utils import CommMeter, flatten_params, git_hash, load_config, pick_device, set_seed, unflatten_to
+from .utils import (
+    CommMeter,
+    flatten_params,
+    git_hash,
+    load_config,
+    make_amp,
+    pick_device,
+    set_seed,
+    unflatten_to,
+)
 
 
 class OuterNesterov:
@@ -51,19 +60,23 @@ class OuterNesterov:
             p.copy_(new)
 
 
-def _inner_train(model, shard_ds: TokenDataset, cfg: dict, rng, poison_seed: int | None) -> None:
+def _inner_train(model, shard_ds: TokenDataset, cfg: dict, rng, poison_seed: int | None, amp) -> None:
     """Run H inner AdamW steps in place on ``model``."""
+    use_amp, scaler = amp
     opt = AdamW(model.parameters(), lr=cfg["inner_lr"], weight_decay=cfg["weight_decay"])
     model.train()
     for _ in range(cfg["H"]):
         x, y = shard_ds.batch(cfg["batch_size"], rng)
         if poison_seed is not None:
             y = poison_targets(y, model.cfg.vocab_size, poison_seed)
-        _, loss = model(x, y)
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
+            _, loss = model(x, y)
+        scaler.scale(loss).backward()
+        scaler.unscale_(opt)
         clip_grad_norm_(list(model.parameters()), cfg["grad_clip"])
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
 
 
 def run_diloco(cfg: dict, device: torch.device | None = None) -> dict:
@@ -107,6 +120,7 @@ def run_diloco(cfg: dict, device: torch.device | None = None) -> dict:
 
     comm = CommMeter(param_count=sum(p.numel() for p in global_model.parameters()))
     rng = np.random.default_rng(cfg["seed"])
+    amp = make_amp(device, cfg.get("amp", True))
 
     history = []
     t0 = time.time()
@@ -120,7 +134,7 @@ def run_diloco(cfg: dict, device: torch.device | None = None) -> dict:
             poison = None
             if attack.is_inner and k in byz_idx:
                 poison = cfg["seed"] * 1000 + k  # stable per-worker poisoning permutation
-            _inner_train(worker, worker_ds[k], cfg, rng, poison)
+            _inner_train(worker, worker_ds[k], cfg, rng, poison, amp)
             delta_k = theta_flat - flatten_params(list(worker.parameters()))
             deltas.append(delta_k)
 
@@ -205,6 +219,7 @@ def run_synchronous(cfg: dict, device: torch.device | None = None) -> dict:
     model = build_model(mcfg).to(device)
     opt = AdamW(model.parameters(), lr=cfg["inner_lr"], weight_decay=cfg["weight_decay"])
 
+    use_amp, scaler = make_amp(device, cfg.get("amp", True))
     total_steps = cfg["outer_rounds"] * cfg["n_workers"] * cfg["H"]
     param_count = sum(p.numel() for p in model.parameters())
     rng = np.random.default_rng(cfg["seed"])
@@ -215,11 +230,14 @@ def run_synchronous(cfg: dict, device: torch.device | None = None) -> dict:
     for step in range(total_steps):
         model.train()
         x, y = train_ds.batch(cfg["batch_size"], rng)
-        _, loss = model(x, y)
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        with torch.autocast("cuda", dtype=torch.float16, enabled=use_amp):
+            _, loss = model(x, y)
+        scaler.scale(loss).backward()
+        scaler.unscale_(opt)
         clip_grad_norm_(list(model.parameters()), cfg["grad_clip"])
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
         if step % eval_every_steps == 0 or step == total_steps - 1:
             vloss = _evaluate(model, val_ds, rng, cfg["batch_size"], cfg.get("eval_batches", 10))
             history.append({"step": step, "val_loss": float(vloss), "val_ppl": float(np.exp(min(vloss, 20)))})

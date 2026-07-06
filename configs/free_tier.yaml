@@ -12,6 +12,7 @@
 
 seed: 0
 device: auto
+amp: true              # fp16 mixed precision on CUDA (auto-disabled on CPU) — big T4 speedup
 seq_len: 128
 batch_size: 32
 
