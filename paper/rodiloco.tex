@@ -1,7 +1,7 @@
-% RoDiLoCo — arXiv-style writeup.
-% Compiles out-of-the-box with `article`. To switch to the official ICML/NeurIPS style,
-% drop in icml2024.sty / neurips_2024.sty, replace the \documentclass line, and delete the
-% geometry package. Build:  pdflatex rodiloco ; bibtex rodiloco ; pdflatex rodiloco x2
+% RoDiLoCo --- arXiv preprint.
+% Build:  pdflatex rodiloco ; bibtex rodiloco ; pdflatex rodiloco ; pdflatex rodiloco
+% (or: latexmk -pdf rodiloco.tex). Figures live in ./figures/ so the source is a
+% self-contained arXiv tarball (arXiv rejects ../ paths).
 \documentclass[11pt]{article}
 
 \usepackage[margin=1in]{geometry}
@@ -11,22 +11,36 @@
 \usepackage{algorithm}
 \usepackage{algpseudocode}
 \usepackage[numbers,round]{natbib}
-\usepackage[hidelinks]{hyperref}
 \usepackage{xcolor}
+\usepackage[colorlinks=true,allcolors=blue!55!black]{hyperref}
+\usepackage{url}
+
+\hypersetup{
+  pdftitle={RoDiLoCo: Byzantine-Robust Low-Communication Distributed Training},
+  pdfauthor={Taha Benkiran},
+  pdfkeywords={distributed training, DiLoCo, Byzantine robustness, federated learning, low-communication training}
+}
 
 \newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
 % show the figure if its PNG has been committed, else a labelled placeholder box
 \newcommand{\figorbox}[2]{\IfFileExists{#1}{\includegraphics[width=#2]{#1}}%
-  {\fbox{\parbox{#2}{\centering\vspace{1.5cm}\texttt{#1}\\(run the notebook / add the PNG)\vspace{1.5cm}}}}}
+  {\fbox{\parbox{#2}{\centering\vspace{1.5cm}\texttt{\detokenize{#1}}\\(run the notebook / add the PNG)\vspace{1.5cm}}}}}
 \newcommand{\dg}{\Delta}          % pseudo-gradient
 \newcommand{\agg}{\bar{\Delta}}   % aggregated pseudo-gradient
 
-\title{\textbf{RoDiLoCo}: How Fragile is Low-Communication Training,\\ and Can Classical Byzantine Defenses Save It?}
-\author{Taha Benkiran}
+\title{\textbf{RoDiLoCo}: How Fragile is Low-Communication Training,\\[2pt]
+  and Can Classical Byzantine Defenses Save It?}
+\author{Taha Benkiran\\[2pt]\small Independent Researcher\\[1pt]
+  \small \url{https://github.com/MTahaB/RoDiLoCo}}
 \date{\today}
 
 \begin{document}
 \maketitle
+
+\begin{center}\vspace{-1.2em}
+\small\textbf{Keywords:} distributed training $\cdot$ DiLoCo $\cdot$ Byzantine robustness
+$\cdot$ low-communication training $\cdot$ federated optimization
+\end{center}
 
 \begin{abstract}
 Low-communication training methods such as DiLoCo~\citep{diloco2023} promise
@@ -106,12 +120,18 @@ the honest cloud~\citep{alie2019,minmax2021}, which evade distance- and clusteri
 defenses by construction.
 
 \paragraph{The gap.}
-DiLoCo's outer step differs from that setting on three axes at once: it aggregates
-\emph{pseudo-gradients} (accumulated over $H$ AdamW steps, not single gradients), those are
-consumed by \emph{outer momentum}, and $n$ is \emph{small} ($\approx 8$). The nearest
-adjacent work, DeMoA~\citep{demoa2025}, combines Byzantine robustness, communication
-efficiency, and momentum---but in federated learning over client gradients, not DiLoCo
-pretraining. RoDiLoCo studies the empty intersection.
+DiLoCo's outer step differs from the classical Byzantine setting on three axes at once: it
+aggregates \emph{pseudo-gradients} (accumulated over $H$ AdamW steps, not single gradients),
+those are consumed by \emph{outer momentum}, and $n$ is \emph{small} ($\approx 8$). Three lines
+of work bracket this intersection without occupying it. Decoupled
+DiLoCo~\citep{decoupleddiloco2026} makes DiLoCo \emph{resilient} to crash and straggler faults
+via quorum-based synchronisation---honest-but-absent workers, not adversarial ones;
+fault-tolerance is not Byzantine-tolerance. Work on outer optimizers in local
+SGD~\citep{outeroptimizers2025} characterises the outer learning rate and momentum we attack,
+but assumes no adversary. And DeMoA~\citep{demoa2025} combines Byzantine robustness,
+communication efficiency, and momentum---but in federated learning over client gradients with
+partial participation, not DiLoCo pretraining. RoDiLoCo studies the empty intersection:
+Byzantine robustness of the DiLoCo outer optimizer itself.
 
 \section{Threat Model and Setup}
 \label{sec:setup}
@@ -175,7 +195,7 @@ at $f{=}0$, it diverges (perplexity hits our $e^{20}$ cap) at $f{=}1$ and beyond
 
 \begin{figure}[t]
   \centering
-  \figorbox{../results/plot1_fragility.png}{0.6\linewidth}
+  \figorbox{figures/plot1_fragility.png}{0.6\linewidth}
   \caption{\textbf{One liar in eight kills pretraining.} Final perplexity (log scale) under
   mean aggregation as a function of the Byzantine fraction $f$ (sign-flip attack).}
   \label{fig:fragility}
@@ -214,15 +234,35 @@ Two design choices proved decisive under strong attacks, each traceable to an ob
 the round-0 mean, which is already poisoned) --- this alone moved $f{=}2$ from divergence to
 survival; and (ii) a \emph{median-norm rescale} (rescale the aggregate to the median rather
 than the mean $\Delta$ norm), preventing a norm-inflating attacker from blowing up the
-aggregate magnitude round over round into a NaN.
+aggregate magnitude round over round into a NaN. The full procedure is
+Algorithm~\ref{alg:trust}.
+
+\begin{algorithm}[t]
+\caption{Trust-weighted outer aggregation (one round $t$)}
+\label{alg:trust}
+\begin{algorithmic}[1]
+\Require pseudo-gradients $\{\dg_k\}_{k=1}^n$; EMA rate $\beta$; temperature $\tau$; state
+  $s\in\mathbb{R}^n$, previous aggregate $\agg_{\text{prev}}$
+\If{$\agg_{\text{prev}}$ is undefined} \Comment{robust cold-start}
+  \State $\agg \gets \mathrm{GeometricMedian}(\{\dg_k\})$
+\Else
+  \State $s_k \gets \beta\, s_k + (1-\beta)\,\cos(\dg_k, \agg_{\text{prev}})$ \textbf{ for all } $k$
+  \State $w \gets \mathrm{softmax}(s / \tau)$
+  \State $\agg \gets \sum_k w_k\, \widehat{\dg}_k$ \Comment{$\widehat{\dg}_k = \dg_k/\|\dg_k\|$}
+  \State $\agg \gets \dfrac{\agg}{\|\agg\|}\cdot \mathrm{median}_k \|\dg_k\|$ \Comment{robust rescale}
+\EndIf
+\State $\agg_{\text{prev}} \gets \agg$
+\State \Return $\agg$ \Comment{consumed by the outer Nesterov step}
+\end{algorithmic}
+\end{algorithm}
 
 \begin{figure}[t]
   \centering
   \begin{minipage}{0.48\linewidth}\centering
-    \figorbox{../results/plot2_defense.png}{\linewidth}
+    \figorbox{figures/plot2_defense.png}{\linewidth}
   \end{minipage}\hfill
   \begin{minipage}{0.48\linewidth}\centering
-    \figorbox{../results/plot3_tax.png}{\linewidth}
+    \figorbox{figures/plot3_tax.png}{\linewidth}
   \end{minipage}
   \caption{Left: defense transfer under attack. Right: the robustness tax---perplexity at
   $f=0$ relative to the naive mean.}
@@ -257,11 +297,31 @@ the small-$n$ cost of discarding $f{+}2$ candidates. The proposed trust-weighted
 the only aggregator that is simultaneously the cheapest at $f{=}0$ and the flattest under
 attack (perplexity $3.27$--$3.33$ across $f\in\{0,1,2\}$).
 
+\subsection{Does the pattern hold at scale?}
+\label{sec:scale}
+To check that these conclusions are not an artefact of the smallest model, we repeat the
+defense comparison with an identical training recipe on a $6\times$ larger model
+($10.7$M parameters, $d_{\text{model}}{=}384$, $6$ layers), at a single seed
+(Figure~\ref{fig:scale}). \todo{Confirm: the mean still diverges at $f{=}1$; Krum, geometric
+median, centered clipping and trust-weighted still hold; trust-weighted remains the cheapest.
+Report the $6$-defense $\times\ f$ table.} The qualitative story is unchanged, supporting the
+view---consistent with DiLoCo scaling laws~\citep{dilocoscaling2025}---that fragility and
+partial-transfer are properties of the outer-aggregation regime rather than of a particular
+model size.
+
+\begin{figure}[t]
+  \centering
+  \figorbox{figures/plot_scale_defense.png}{0.6\linewidth}
+  \caption{\textbf{The pattern holds at $6\times$ scale.} Defense transfer under sign-flip at
+  $10.7$M parameters (single seed); compare Figure~\ref{fig:defenses}.}
+  \label{fig:scale}
+\end{figure}
+
 \section{Limitations and Directions}
 \label{sec:limitations}
-Our study is deliberately small-scale: a $1.8$M-parameter model, workers \emph{simulated}
-rather than physically distributed, i.i.d.\ shards, a single seed for the headline table, and
-one attack family (sign-flip) in the main comparison. The $f{=}2$ result for trust-weighted
+Our study is deliberately small-scale: a $1.8$M-parameter headline model (with a $10.7$M
+scale check, \S\ref{sec:scale}), workers \emph{simulated} rather than physically distributed,
+i.i.d.\ shards, and one attack family (sign-flip) in the main comparison. The $f{=}2$ result for trust-weighted
 being marginally below $f{=}0$ is within seed noise; the honest claim is ``flat'', not
 ``improves under attack''. Scaling laws for DiLoCo~\citep{dilocoscaling2025} suggest which
 conclusions should hold at larger scale, but we do not verify this directly. Natural
@@ -275,7 +335,18 @@ tenable. We quantified DiLoCo's fragility to Byzantine workers (a single worker 
 suffices to diverge it), measured how far classical defenses transfer and at what cost, and
 proposed a trust-weighted outer optimizer that, in our setting, is both the cheapest and the
 most robust defense --- turning DiLoCo from resilient-to-faults into robust-to-adversaries at
-no cost when no one cheats.
+no cost when no one cheats. We release all code, configs, and results so the study can be
+reproduced end-to-end on a single free GPU.
+
+\paragraph{Reproducibility.} All experiments run on one GPU with sequentially-simulated
+workers; the headline campaign completes in $\sim$45 minutes on a free T4. Code, YAML configs,
+seeds, and a one-click notebook are available at \url{https://github.com/MTahaB/RoDiLoCo}.
+Each run records its seed, config, and git commit hash in a \texttt{history.json}; the exact
+hyperparameters are in Table~\ref{tab:hp}.
+
+\section*{Acknowledgements}
+This work grew out of an independent research project bridging Byzantine-robust federated
+optimization and low-communication distributed training.
 
 \bibliographystyle{plainnat}
 \bibliography{references}
